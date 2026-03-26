@@ -4,6 +4,9 @@ on:
   issues:
     types: [opened]
 
+permissions:
+  issues: write
+
 jobs:
   classify-issue:
     runs-on: ubuntu-latest
@@ -20,21 +23,17 @@ jobs:
 
           echo "Processing issue title: $TITLE"
 
-          PAYLOAD=$(python3 - <<'PY'
-import json
-import os
+          if [ -z "${HF_TOKEN:-}" ]; then
+            echo "status=error" >> "$GITHUB_OUTPUT"
+            echo "message=HF_TOKEN secret is not configured" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-title = os.environ.get("TITLE", "")
-print(json.dumps({
-    "inputs": title,
-    "options": {
-        "wait_for_model": True
-    }
-}))
-PY
-)
+          PAYLOAD=$(jq -n \
+            --arg title "$TITLE" \
+            '{inputs: $title, options: {wait_for_model: true}}')
 
-          RESPONSE=$(curl -s \
+          RESPONSE=$(curl -sS \
             -X POST \
             -H "Authorization: Bearer $HF_TOKEN" \
             -H "Content-Type: application/json" \
@@ -43,76 +42,58 @@ PY
 
           echo "Raw response: $RESPONSE"
 
-          PARSED=$(printf '%s' "$RESPONSE" | python3 - <<'PY'
-import sys
-import json
-
-raw = sys.stdin.read().strip()
-
-if not raw:
-    print("status=error")
-    print("message=Empty response from Hugging Face API")
-    sys.exit(0)
-
-try:
-    data = json.loads(raw)
-except json.JSONDecodeError:
-    print("status=error")
-    print("message=Invalid JSON response from Hugging Face API")
-    sys.exit(0)
-
-# Handle API error object
-if isinstance(data, dict):
-    msg = data.get("error") or data.get("message") or "Unexpected object response from Hugging Face API"
-    print("status=error")
-    print(f"message={msg}")
-    sys.exit(0)
-
-# Handle expected list / nested list response
-try:
-    if not isinstance(data, list) or len(data) == 0:
-        raise ValueError("Response is not a non-empty list")
-
-    candidates = data[0] if isinstance(data[0], list) else data
-
-    if not isinstance(candidates, list) or len(candidates) == 0:
-        raise ValueError("No prediction candidates found")
-
-    top = max(candidates, key=lambda x: x.get("score", 0))
-
-    label = top.get("label", "UNKNOWN")
-    score = round(float(top.get("score", 0)) * 100, 1)
-
-    print("status=success")
-    print(f"label={label}")
-    print(f"score={score}")
-except Exception as e:
-    print("status=error")
-    print(f"message=Parsing failed: {str(e)}")
-PY
-)
-
-          echo "$PARSED"
-
-          STATUS=$(echo "$PARSED" | grep '^status=' | cut -d= -f2- || true)
-          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
-
-          if [ "$STATUS" = "success" ]; then
-            LABEL=$(echo "$PARSED" | grep '^label=' | cut -d= -f2- || true)
-            SCORE=$(echo "$PARSED" | grep '^score=' | cut -d= -f2- || true)
-            echo "label=$LABEL" >> "$GITHUB_OUTPUT"
-            echo "score=$SCORE" >> "$GITHUB_OUTPUT"
-          else
-            MESSAGE=$(echo "$PARSED" | grep '^message=' | cut -d= -f2- || true)
-            echo "message=$MESSAGE" >> "$GITHUB_OUTPUT"
+          if ! echo "$RESPONSE" | jq -e . >/dev/null 2>&1; then
+            echo "status=error" >> "$GITHUB_OUTPUT"
+            echo "message=Invalid JSON response from Hugging Face API" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          RESPONSE_TYPE=$(echo "$RESPONSE" | jq -r 'type')
+
+          if [ "$RESPONSE_TYPE" = "object" ]; then
+            MESSAGE=$(echo "$RESPONSE" | jq -r '.error // .message // "Unexpected object response from Hugging Face API"')
+            echo "status=error" >> "$GITHUB_OUTPUT"
+            echo "message=$MESSAGE" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          LABEL=$(echo "$RESPONSE" | jq -r '
+            try (
+              if (.[0] | type) == "array" then
+                .[0] | max_by(.score) | .label
+              else
+                . | max_by(.score) | .label
+              end
+            ) catch "PARSE_ERROR"
+          ')
+
+          RAW_SCORE=$(echo "$RESPONSE" | jq -r '
+            try (
+              if (.[0] | type) == "array" then
+                .[0] | max_by(.score) | .score
+              else
+                . | max_by(.score) | .score
+              end
+            ) catch "PARSE_ERROR"
+          ')
+
+          if [ "$LABEL" = "PARSE_ERROR" ] || [ "$RAW_SCORE" = "PARSE_ERROR" ] || [ -z "$LABEL" ] || [ -z "$RAW_SCORE" ]; then
+            echo "status=error" >> "$GITHUB_OUTPUT"
+            echo "message=Parsing failed: unexpected response structure" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          SCORE=$(awk "BEGIN { printf \"%.1f\", $RAW_SCORE * 100 }")
+
+          echo "status=success" >> "$GITHUB_OUTPUT"
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+          echo "score=$SCORE" >> "$GITHUB_OUTPUT"
 
       - name: Post AI triage comment
         uses: actions/github-script@v7
         with:
           script: |
             const status = `${{ steps.sentiment.outputs.status }}`;
-
             let body = "";
 
             if (status === "success") {
