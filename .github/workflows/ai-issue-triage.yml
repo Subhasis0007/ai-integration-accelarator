@@ -93,35 +93,39 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const status = `${{ steps.sentiment.outputs.status }}`;
-            let body = "";
+            const status = '${{ steps.sentiment.outputs.status }}';
+            let body = '';
 
-            if (status === "success") {
-              const label = `${{ steps.sentiment.outputs.label }}`;
-              const score = `${{ steps.sentiment.outputs.score }}`;
-              const emoji = label === "POSITIVE" ? "🟢" : "🔴";
+            if (status === 'success') {
+              const label = '${{ steps.sentiment.outputs.label }}';
+              const score = '${{ steps.sentiment.outputs.score }}';
+              const emoji = label === 'POSITIVE' ? '🟢' : '🔴';
 
-              body = `## 🤖 AI Triage Result
-
-${emoji} **Sentiment:** ${label}
-📊 **Confidence:** ${score}%
-
-*This was auto-classified by an AI integration pipeline (Hugging Face DistilBERT + GitHub Actions). In an enterprise setup, this could route to Dynamics 365, Service Bus, or trigger a Logic Apps workflow.*`;
+              body = [
+                '## 🤖 AI Triage Result',
+                '',
+                `${emoji} **Sentiment:** ${label}`,
+                `📊 **Confidence:** ${score}%`,
+                '',
+                '*This was auto-classified by an AI integration pipeline (Hugging Face DistilBERT + GitHub Actions). In an enterprise setup, this could route to Dynamics 365, Service Bus, or trigger a Logic Apps workflow.*'
+              ].join('\n');
             } else {
-              const message = `${{ steps.sentiment.outputs.message }}`;
+              const message = '${{ steps.sentiment.outputs.message }}';
 
-              body = `## 🤖 AI Triage Result
-
-⚠️ The sentiment classification could not be completed.
-
-**Reason:** ${message}
-
-*This issue was still detected by the workflow, but the AI model response could not be parsed successfully.*`;
+              body = [
+                '## 🤖 AI Triage Result',
+                '',
+                '⚠️ The sentiment classification could not be completed.',
+                '',
+                `**Reason:** ${message}`,
+                '',
+                '*This issue was still detected by the workflow, but the AI model response could not be parsed successfully.*'
+              ].join('\n');
             }
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body
+              body: body
             });
