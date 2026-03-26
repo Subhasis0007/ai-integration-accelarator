@@ -1,0 +1,46 @@
+name: AI Issue Triage
+on:
+ issues:
+   types: [opened]
+jobs:
+ classify-issue:
+   runs-on: ubuntu-latest
+   steps:
+     - name: Call Hugging Face Sentiment API
+       id: sentiment
+       run: |
+         RESPONSE=$(curl -s \
+           -X POST \
+           -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
+           -H "Content-Type: application/json" \
+           -d "{\"inputs\": \"${{ github.event.issue.title }}\"}" \
+           "https://api-inference.huggingface.co/models/distilbert-base-uncased-finetuned-sst-2-english")
+         echo "response=$RESPONSE" >> $GITHUB_OUTPUT
+         LABEL=$(echo $RESPONSE | python3 -c "
+         import sys, json
+         data = json.load(sys.stdin)
+         top = max(data[0], key=lambda x: x['score'])
+         print(top['label'])
+         ")
+         SCORE=$(echo $RESPONSE | python3 -c "
+         import sys, json
+         data = json.load(sys.stdin)
+         top = max(data[0], key=lambda x: x['score'])
+         print(round(top['score']*100, 1))
+         ")
+         echo "label=$LABEL" >> $GITHUB_OUTPUT
+         echo "score=$SCORE" >> $GITHUB_OUTPUT
+     - name: Post AI triage comment
+       uses: actions/github-script@v7
+       with:
+         script: |
+           const label = "${{ steps.sentiment.outputs.label }}";
+           const score = "${{ steps.sentiment.outputs.score }}";
+           const emoji = label === "POSITIVE" ? "🟢" : "🔴";
+           const body = `## 🤖 AI Triage Result\n\n${emoji} **Sentiment:** ${label}\n📊 **Confidence:** ${score}%\n\n*This was auto-classified by an AI integration pipeline (Hugging Face DistilBERT + GitHub Actions). In an enterprise setup, this would route to Dynamics 365, Service Bus, or trigger a Logic Apps workflow.*`;
+           await github.rest.issues.createComment({
+             owner: context.repo.owner,
+             repo: context.repo.repo,
+             issue_number: context.issue.number,
+             body: body
+           });
