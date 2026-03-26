@@ -12,56 +12,80 @@ jobs:
       - name: Call Hugging Face Sentiment API
         id: sentiment
         shell: bash
+        env:
+          TITLE: ${{ github.event.issue.title }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          TITLE='${{ github.event.issue.title }}'
+          set -euo pipefail
+
+          echo "Processing issue title: $TITLE"
 
           PAYLOAD=$(python3 - <<'PY'
-import json, os
-title = os.environ["TITLE"]
+import json
+import os
+
+title = os.environ.get("TITLE", "")
 print(json.dumps({
     "inputs": title,
-    "options": {"wait_for_model": True}
+    "options": {
+        "wait_for_model": True
+    }
 }))
 PY
 )
-          export TITLE
 
           RESPONSE=$(curl -s \
             -X POST \
-            -H "Authorization: Bearer ${{ secrets.HF_TOKEN }}" \
+            -H "Authorization: Bearer $HF_TOKEN" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD" \
             "https://api-inference.huggingface.co/models/distilbert-base-uncased-finetuned-sst-2-english")
 
           echo "Raw response: $RESPONSE"
 
-          PARSED=$(echo "$RESPONSE" | python3 - <<'PY'
-import sys, json
+          PARSED=$(printf '%s' "$RESPONSE" | python3 - <<'PY'
+import sys
+import json
 
 raw = sys.stdin.read().strip()
+
+if not raw:
+    print("status=error")
+    print("message=Empty response from Hugging Face API")
+    sys.exit(0)
 
 try:
     data = json.loads(raw)
 except json.JSONDecodeError:
     print("status=error")
-    print("message=Invalid JSON response from Hugging Face")
+    print("message=Invalid JSON response from Hugging Face API")
     sys.exit(0)
 
-# Handle API error response
+# Handle API error object
 if isinstance(data, dict):
-    msg = data.get("error", "Unexpected object response from Hugging Face API")
+    msg = data.get("error") or data.get("message") or "Unexpected object response from Hugging Face API"
     print("status=error")
     print(f"message={msg}")
     sys.exit(0)
 
-# Handle expected list response
+# Handle expected list / nested list response
 try:
-    # HF often returns: [[{label, score}, {label, score}]]
+    if not isinstance(data, list) or len(data) == 0:
+        raise ValueError("Response is not a non-empty list")
+
     candidates = data[0] if isinstance(data[0], list) else data
-    top = max(candidates, key=lambda x: x["score"])
+
+    if not isinstance(candidates, list) or len(candidates) == 0:
+        raise ValueError("No prediction candidates found")
+
+    top = max(candidates, key=lambda x: x.get("score", 0))
+
+    label = top.get("label", "UNKNOWN")
+    score = round(float(top.get("score", 0)) * 100, 1)
+
     print("status=success")
-    print(f"label={top['label']}")
-    print(f"score={round(top['score'] * 100, 1)}")
+    print(f"label={label}")
+    print(f"score={score}")
 except Exception as e:
     print("status=error")
     print(f"message=Parsing failed: {str(e)}")
@@ -70,30 +94,30 @@ PY
 
           echo "$PARSED"
 
-          STATUS=$(echo "$PARSED" | grep '^status=' | cut -d= -f2-)
-          echo "status=$STATUS" >> $GITHUB_OUTPUT
+          STATUS=$(echo "$PARSED" | grep '^status=' | cut -d= -f2- || true)
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
 
           if [ "$STATUS" = "success" ]; then
-            LABEL=$(echo "$PARSED" | grep '^label=' | cut -d= -f2-)
-            SCORE=$(echo "$PARSED" | grep '^score=' | cut -d= -f2-)
-            echo "label=$LABEL" >> $GITHUB_OUTPUT
-            echo "score=$SCORE" >> $GITHUB_OUTPUT
+            LABEL=$(echo "$PARSED" | grep '^label=' | cut -d= -f2- || true)
+            SCORE=$(echo "$PARSED" | grep '^score=' | cut -d= -f2- || true)
+            echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+            echo "score=$SCORE" >> "$GITHUB_OUTPUT"
           else
-            MESSAGE=$(echo "$PARSED" | grep '^message=' | cut -d= -f2-)
-            echo "message=$MESSAGE" >> $GITHUB_OUTPUT
+            MESSAGE=$(echo "$PARSED" | grep '^message=' | cut -d= -f2- || true)
+            echo "message=$MESSAGE" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Post AI triage comment
         uses: actions/github-script@v7
         with:
           script: |
-            const status = "${{ steps.sentiment.outputs.status }}";
+            const status = `${{ steps.sentiment.outputs.status }}`;
 
             let body = "";
 
             if (status === "success") {
-              const label = "${{ steps.sentiment.outputs.label }}";
-              const score = "${{ steps.sentiment.outputs.score }}";
+              const label = `${{ steps.sentiment.outputs.label }}`;
+              const score = `${{ steps.sentiment.outputs.score }}`;
               const emoji = label === "POSITIVE" ? "🟢" : "🔴";
 
               body = `## 🤖 AI Triage Result
@@ -101,9 +125,9 @@ PY
 ${emoji} **Sentiment:** ${label}
 📊 **Confidence:** ${score}%
 
-*This was auto-classified by an AI integration pipeline (Hugging Face DistilBERT + GitHub Actions). In an enterprise setup, this would route to Dynamics 365, Service Bus, or trigger a Logic Apps workflow.*`;
+*This was auto-classified by an AI integration pipeline (Hugging Face DistilBERT + GitHub Actions). In an enterprise setup, this could route to Dynamics 365, Service Bus, or trigger a Logic Apps workflow.*`;
             } else {
-              const message = "${{ steps.sentiment.outputs.message }}";
+              const message = `${{ steps.sentiment.outputs.message }}`;
 
               body = `## 🤖 AI Triage Result
 
