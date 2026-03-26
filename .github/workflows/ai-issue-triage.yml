@@ -18,6 +18,7 @@ jobs:
         env:
           TITLE: ${{ github.event.issue.title }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_MODEL: distilbert/distilbert-base-uncased-finetuned-sst-2-english
         run: |
           set -euo pipefail
 
@@ -38,7 +39,7 @@ jobs:
             -H "Authorization: Bearer $HF_TOKEN" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD" \
-            "https://api-inference.huggingface.co/models/distilbert-base-uncased-finetuned-sst-2-english")
+            "https://router.huggingface.co/hf-inference/models/$HF_MODEL")
 
           echo "Raw response: $RESPONSE"
 
